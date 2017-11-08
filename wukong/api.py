@@ -16,6 +16,58 @@ def _add_scheme_if_not_there(url, scheme='http'):
 
     return url
 
+def _determine_solr_and_zkhosts(
+    solr_collection,
+    solr_hosts,
+    zookeeper_hosts,
+    zookeeper_timeout
+):
+    zookeeper_host_list = []
+    solr_host_list = []
+    if solr_hosts is None and zookeeper_hosts is not None:
+        logger.info(
+            'Getting solr hosts from zookeeper for collection %s',
+            solr_collection
+        )
+        zk = Zookeeper(zookeeper_hosts, zookeeper_timeout)
+        solr_hosts = zk.get_active_hosts(collection_name=solr_collection)
+
+    if not solr_hosts:
+        logger.error('Unable to determine any solr host names')
+        raise solr_errors.SolrError(
+            'No solr hostnames found for collection {}'.format(solr_collection)
+        )
+
+    if not isinstance(solr_hosts, list):
+        solr_hosts = solr_hosts.split(',')
+
+    if zookeeper_hosts:
+        hostnames, _, chroot = zookeeper_hosts.rpartition('/')
+
+        # If hostnames is empty then there is no chroot. Set it to empty.
+        if not hostnames:
+            chroot = ''
+        else:
+            chroot = '/{}'.format(chroot)
+
+        zookeeper_host_list = [
+            '{}{}'.format(_add_scheme_if_not_there(host), chroot)
+            for host in hostnames
+        ]
+
+        logger.info(
+            'Determined zookeeper host list as %s',
+            zookeeper_host_list
+        )
+
+    solr_host_list = [
+        _add_scheme_if_not_there(host)
+        for host in solr_hosts
+    ]
+
+    return solr_host_list, zookeeper_host_list
+
+
 class SolrAPI(object):
 
     def __init__(self, solr_hosts, solr_collection,
@@ -38,56 +90,14 @@ class SolrAPI(object):
 
         """
 
-        if solr_hosts is None and zookeeper_hosts is not None:
-            logger.info(
-                'Getting solr hosts from zookeeper for collection %s',
-                solr_collection
-            )
-            zk = Zookeeper(zookeeper_hosts, zookeeper_timeout)
-            solr_hosts = zk.get_active_hosts(collection_name=solr_collection)
-
-        if solr_hosts is None or solr_collection is None:
-            logger.error('Neither solr_hosts nor solr_collection has been set')
-            raise solr_errors.SolrError(
-                "Either solr_hosts or solr_collection can not be None"
-            )
-
-        if not isinstance(solr_hosts, list):
-            solr_hosts = solr_hosts.split(",")
-
-        if zookeeper_hosts is not None:
-            hostnames, sep, chroot = zookeeper_hosts.rpartition('/')
-
-            # If hostnames is empty then there is no chroot. Set it to empty.
-            if not hostnames:
-                chroot = ''
-            else:
-                chroot = '/%s' % chroot
-
-            logger.debug('Using solr via zookeeper at chroot %s', chroot)
-
-            self.zookeeper_hosts = [
-                "http://%s%s" % (host, chroot,)
-                for host in zookeeper_hosts.split(",")
-            ]
-
-            logger.info(
-                'Connected to zookeeper hosts at %s',
-                self.zookeeper_hosts
-            )
-
-        else:
-            logger.debug('Not using zookeeper for SolrCloud')
-            self.zookeeper_hosts = None
-
-        logger.info('Connected to solr hosts %s', solr_hosts)
-
-        self.solr_hosts = [
-            "{}/solr/".format(_add_scheme_if_not_there(host))
-            for host in solr_hosts
-        ]
-
         self.solr_collection = solr_collection
+
+        self.solr_hosts, self.zookeeper_hosts = _determine_solr_and_zk_hosts(
+            self.solr_collection,
+            solr_hosts,
+            zookeeper_hosts,
+            zookeeper_timeout
+        )
 
         self.client = SolrRequest(
             solr_hosts=self.solr_hosts,
